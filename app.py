@@ -59,25 +59,33 @@ async def notify_and_autodelete(chat_id: int, text: str, context: ContextTypes.D
     except Exception:
         pass
 
-# >>> NEW: פונקציית עזר — בדיקת אדמין (תומכת גם במנהלים אנונימיים)
+# >>> NEW: פונקציית עזר — בדיקת אדמין
+
 async def is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
     user = update.effective_user
-    sender_chat = update.effective_sender_chat  # למקרה של אדמין אנונימי
+    msg = update.effective_message  # זו הדרך הבטוחה להגיע ל-message
 
-    # אדמין אנונימי: הודעה שנשלחת בשם הקבוצה/ערוץ עצמו
-    if sender_chat and chat and sender_chat.id == chat.id:
-        return True
-
-    if not chat or not user:
+    if not chat:
         return False
 
+    # אדמין אנונימי: אם ההודעה נשלחת בשם הקבוצה/ערוץ (sender_chat קיים)
+    # ובפרט אם sender_chat.id == chat.id (הודעה "מטעם" הקבוצה עצמה)
+    if msg and getattr(msg, "sender_chat", None):
+        try:
+            if msg.sender_chat.id == chat.id:
+                return True
+        except Exception:
+            pass  # ניפול חזרה לבדיקה הרגילה
+
+    # בדיקה רגילה: משתמש הוא אדמין/יוצר
+    if not user:
+        return False
     try:
         member = await context.bot.get_chat_member(chat.id, user.id)
         return member.status in ("administrator", "creator")
     except Exception:
         return False
-# <<< NEW
 
 async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
