@@ -59,6 +59,26 @@ async def notify_and_autodelete(chat_id: int, text: str, context: ContextTypes.D
     except Exception:
         pass
 
+# >>> NEW: פונקציית עזר — בדיקת אדמין (תומכת גם במנהלים אנונימיים)
+async def is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    chat = update.effective_chat
+    user = update.effective_user
+    sender_chat = update.effective_sender_chat  # למקרה של אדמין אנונימי
+
+    # אדמין אנונימי: הודעה שנשלחת בשם הקבוצה/ערוץ עצמו
+    if sender_chat and chat and sender_chat.id == chat.id:
+        return True
+
+    if not chat or not user:
+        return False
+
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
+# <<< NEW
+
 async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat or chat.type not in (Chat.SUPERGROUP, Chat.GROUP):
@@ -68,6 +88,15 @@ async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         return
+
+    # >>> NEW: רק אדמינים רשאים
+    if not await is_user_admin(update, context):
+        try:
+            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
+        return
+    # <<< NEW
 
     args_text = " ".join(context.args).strip() if context.args else ""
     reply: Optional[Message] = update.message.reply_to_message if update.message else None
@@ -115,6 +144,16 @@ async def clear_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat:
         return
+
+    # >>> NEW: רק אדמינים רשאים
+    if not await is_user_admin(update, context):
+        try:
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
+        return
+    # <<< NEW
+
     st = sticky_state.pop(chat.id, None)
     if st and st.get("current_msg_id"):
         try:
@@ -129,7 +168,7 @@ async def clear_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     # הודעת אישור קצרה (אוטו-דיליט)
-    await notify_and_autodelete(chat.id, "ביטלתי את הסטיקי", context)
+    #await notify_and_autodelete(chat.id, "ביטלתי את הסטיקי", context)
 
 
 
