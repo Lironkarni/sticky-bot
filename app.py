@@ -19,6 +19,7 @@ WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]     # מחרוזת אקראית ל
 PUBLIC_URL = os.environ.get("PUBLIC_URL")         # ימולא אחרי הדיפלוי הראשון (למשל: https://my-bot.onrender.com)
 
 DEBOUNCE_SECONDS = float(os.environ.get("DEBOUNCE_SECONDS", "0.6"))
+AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", "5"))
 
 # --------------------
 # מצב זיכרון לסטיקי
@@ -43,20 +44,36 @@ application = Application.builder().token(BOT_TOKEN).build()
 
 # ====== Handlers ======
 
+async def notify_and_autodelete(chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE):
+    """שולח הודעה קצרה ומוחק אותה אוטומטית אחרי AUTO_DELETE_SECONDS (אם >0)."""
+    try:
+        sent = await context.bot.send_message(chat_id=chat_id, text=text)
+        if AUTO_DELETE_SECONDS > 0:
+            async def _later():
+                await asyncio.sleep(AUTO_DELETE_SECONDS)
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+                except Exception:
+                    pass
+            asyncio.create_task(_later())
+    except Exception:
+        pass
+        
 async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /sticky <טקסט>  -> יוצר סטיקי מטקסט
-    או: לענות עם /sticky על הודעה -> יוצר סטיקי כהעתקת ההודעה (כולל מדיה)
-    """
     chat = update.effective_chat
     if not chat or chat.type not in (Chat.SUPERGROUP, Chat.GROUP):
-        await update.message.reply_text("הפקודה עובדת רק בקבוצות/סופרגרופ.")
+        # לא שולחים שגיאה; רק מנסים למחוק את הפקודה
+        try:
+            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
         return
 
     args_text = " ".join(context.args).strip() if context.args else ""
     reply: Optional[Message] = update.message.reply_to_message if update.message else None
 
     if args_text:
+        # סטיקי מטקסט
         sticky_state[chat.id] = {
             "mode": "text",
             "text": args_text,
@@ -64,8 +81,8 @@ async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "src_msg_id": None,
             "current_msg_id": None,
         }
-        await update.message.reply_text("סטיקי עודכן לטקסט הנתון. יפורסם תמיד אחרון.")
     elif reply:
+        # סטיקי כהעתקת הודעה
         sticky_state[chat.id] = {
             "mode": "copy",
             "text": None,
@@ -73,17 +90,28 @@ async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "src_msg_id": reply.message_id,
             "current_msg_id": None,
         }
-        await update.message.reply_text("סטיקי עודכן להודעה שעליה ענית. יפורסם תמיד אחרון.")
     else:
-        await update.message.reply_text("שלח טקסט אחרי /sticky או ענה עם /sticky על הודעה קיימת.")
+        # אין תוכן — מוחקים את הפקודה ויוצאים בלי הודעות
+        try:
+            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
         return
 
-    # פרסום ראשוני מיד
+    # פרסום/ריענון הסטיקי
     await post_or_repost_sticky(chat.id, context)
+
+    # מחיקת הודעת הפקודה שלך
+    try:
+        await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+    except Exception:
+        pass
+
+    # הודעת אישור קצרה (תימחק אוטומטית אם AUTO_DELETE_SECONDS>0)
+    await notify_and_autodelete(chat.id, "מחקת את ההודעה שלי בתור סטיקי", context)
 
 
 async def clear_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """ /unsticky -> מבטל סטיקי ומוחק את ההודעה הנוכחית של הסטיקי אם קיימת """
     chat = update.effective_chat
     if not chat:
         return
@@ -91,9 +119,18 @@ async def clear_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if st and st.get("current_msg_id"):
         try:
             await context.bot.delete_message(chat_id=chat.id, message_id=st["current_msg_id"])
-        except Exception as e:
-            logging.warning(f"Failed to delete current sticky: {e}")
-    await update.message.reply_text("הסטיקי בוטל.")
+        except Exception:
+            pass
+
+    # מחיקת הודעת הפקודה שלך
+    try:
+        await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+    except Exception:
+        pass
+
+    # הודעת אישור קצרה (אוטו-דיליט)
+    await notify_and_autodelete(chat.id, "ביטלתי את הסטיקי", context)
+
 
 
 async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
