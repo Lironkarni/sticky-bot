@@ -108,7 +108,7 @@ async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
 
     # הודעת אישור קצרה (תימחק אוטומטית אם AUTO_DELETE_SECONDS>0)
-    await notify_and_autodelete(chat.id, "מחקת את ההודעה שלי בתור סטיקי", context)
+    #await notify_and_autodelete(chat.id, "מחקת את ההודעה שלי בתור סטיקי", context)
 
 
 async def clear_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
