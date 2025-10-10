@@ -18,8 +18,8 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]               # טוקן מה-BotFather
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]     # מחרוזת אקראית לנתיב ה-webhook (למשל: xYz123)
 PUBLIC_URL = os.environ.get("PUBLIC_URL")         # ימולא אחרי הדיפלוי הראשון (למשל: https://my-bot.onrender.com)
 
-DEBOUNCE_SECONDS = float(os.environ.get("DEBOUNCE_SECONDS", "0.6"))
-AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", "5"))
+DEBOUNCE_SECONDS = float(os.environ.get("DEBOUNCE_SECONDS", "1"))
+AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", "0"))
 
 # --------------------
 # מצב זיכרון לסטיקי
@@ -58,7 +58,7 @@ async def notify_and_autodelete(chat_id: int, text: str, context: ContextTypes.D
             asyncio.create_task(_later())
     except Exception:
         pass
-        
+
 async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat or chat.type not in (Chat.SUPERGROUP, Chat.GROUP):
