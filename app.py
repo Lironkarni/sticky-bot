@@ -1,4 +1,5 @@
 import os
+import time
 import asyncio
 import logging
 from typing import Dict, Optional
@@ -15,25 +16,48 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]               # טוקן מה-BotFather
-WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]     # מחרוזת אקראית לנתיב ה-webhook (למשל: xYz123)
-PUBLIC_URL = os.environ.get("PUBLIC_URL")         # ימולא אחרי הדיפלוי הראשון (למשל: https://my-bot.onrender.com)
+WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]     # מחרוזת אקראית לנתיב ה-webhook
+PUBLIC_URL = os.environ.get("PUBLIC_URL")         # למשל: https://my-bot.onrender.com
 
 DEBOUNCE_SECONDS = float(os.environ.get("DEBOUNCE_SECONDS", "1"))
 AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", "0"))
 
 # --------------------
+# /set_time config (סטיקי)
+# --------------------
+DEFAULT_ACTIVE_MINUTES = 5
+MIN_ACTIVE_MINUTES = 1
+MAX_ACTIVE_MINUTES = 20
+
+# --------------------
+# /clear_media config
+# --------------------
+DEFAULT_MEDIA_DELETE_MINUTES = 5
+MIN_MEDIA_DELETE_MINUTES = 1
+MAX_MEDIA_DELETE_MINUTES = 60  # אפשר לשנות אם תרצה
+
+# --------------------
 # מצב זיכרון לסטיקי
 # --------------------
-# מבנה:
 # chat_id -> {
 #   "mode": "text" | "copy",
 #   "text": Optional[str],
 #   "src_chat_id": Optional[int],
 #   "src_msg_id": Optional[int],
 #   "current_msg_id": Optional[int],
+#   "active_until": Optional[float],  # epoch seconds; אם עבר - מפסיקים להזיז
 # }
 sticky_state: Dict[int, Dict] = {}
 repost_tasks: Dict[int, asyncio.Task] = {}
+
+# --------------------
+# מצב למחיקת מדיה (תמונות)
+# --------------------
+# chat_id -> {
+#   "enabled": bool,
+#   "delete_after_minutes": int
+# }
+media_policy: Dict[int, Dict] = {}
 
 # --------------------
 # FastAPI + Telegram
@@ -42,7 +66,7 @@ api = FastAPI()
 application = Application.builder().token(BOT_TOKEN).build()
 
 
-# ====== Handlers ======
+# ====== Helpers ======
 
 async def notify_and_autodelete(chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE):
     """שולח הודעה קצרה ומוחק אותה אוטומטית אחרי AUTO_DELETE_SECONDS (אם >0)."""
@@ -59,24 +83,22 @@ async def notify_and_autodelete(chat_id: int, text: str, context: ContextTypes.D
     except Exception:
         pass
 
-# >>> NEW: פונקציית עזר — בדיקת אדמין
 
 async def is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
     user = update.effective_user
-    msg = update.effective_message  # זו הדרך הבטוחה להגיע ל-message
+    msg = update.effective_message  # הדרך הבטוחה להגיע ל-message
 
     if not chat:
         return False
 
     # אדמין אנונימי: אם ההודעה נשלחת בשם הקבוצה/ערוץ (sender_chat קיים)
-    # ובפרט אם sender_chat.id == chat.id (הודעה "מטעם" הקבוצה עצמה)
     if msg and getattr(msg, "sender_chat", None):
         try:
             if msg.sender_chat.id == chat.id:
                 return True
         except Exception:
-            pass  # ניפול חזרה לבדיקה הרגילה
+            pass
 
     # בדיקה רגילה: משתמש הוא אדמין/יוצר
     if not user:
@@ -87,127 +109,34 @@ async def is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
     except Exception:
         return False
 
-async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    if not chat or chat.type not in (Chat.SUPERGROUP, Chat.GROUP):
-        # לא שולחים שגיאה; רק מנסים למחוק את הפקודה
+
+def clamp_minutes(value: int, min_v: int, max_v: int) -> int:
+    return max(min_v, min(max_v, value))
+
+
+def compute_active_until(minutes: int) -> float:
+    return time.time() + (minutes * 60)
+
+
+def is_sticky_active(st: Dict) -> bool:
+    active_until = st.get("active_until")
+    if not active_until:
+        return False
+    return time.time() <= float(active_until)
+
+
+async def schedule_delete_message(chat_id: int, message_id: int, delay_seconds: int, context: ContextTypes.DEFAULT_TYPE):
+    """מתזמן מחיקת הודעה לאחר delay_seconds. לא זורק חריגות החוצה."""
+    async def _later():
+        await asyncio.sleep(max(0, int(delay_seconds)))
         try:
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
         except Exception:
             pass
-        return
-
-    # >>> NEW: רק אדמינים רשאים
-    if not await is_user_admin(update, context):
-        try:
-            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
-        except Exception:
-            pass
-        return
-    # <<< NEW
-
-    args_text = " ".join(context.args).strip() if context.args else ""
-    reply: Optional[Message] = update.message.reply_to_message if update.message else None
-
-    if args_text:
-        # סטיקי מטקסט
-        sticky_state[chat.id] = {
-            "mode": "text",
-            "text": args_text,
-            "src_chat_id": None,
-            "src_msg_id": None,
-            "current_msg_id": None,
-        }
-    elif reply:
-        # סטיקי כהעתקת הודעה
-        sticky_state[chat.id] = {
-            "mode": "copy",
-            "text": None,
-            "src_chat_id": reply.chat_id,
-            "src_msg_id": reply.message_id,
-            "current_msg_id": None,
-        }
-    else:
-        # אין תוכן — מוחקים את הפקודה ויוצאים בלי הודעות
-        try:
-            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
-        except Exception:
-            pass
-        return
-
-    # פרסום/ריענון הסטיקי
-    await post_or_repost_sticky(chat.id, context)
-
-    # מחיקת הודעת הפקודה שלך
-    try:
-        await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
-    except Exception:
-        pass
-
-    # הודעת אישור קצרה (תימחק אוטומטית אם AUTO_DELETE_SECONDS>0)
-    #await notify_and_autodelete(chat.id, "מחקת את ההודעה שלי בתור סטיקי", context)
+    asyncio.create_task(_later())
 
 
-async def clear_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    if not chat:
-        return
-
-    # >>> NEW: רק אדמינים רשאים
-    if not await is_user_admin(update, context):
-        try:
-            await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=update.message.message_id)
-        except Exception:
-            pass
-        return
-    # <<< NEW
-
-    st = sticky_state.pop(chat.id, None)
-    if st and st.get("current_msg_id"):
-        try:
-            await context.bot.delete_message(chat_id=chat.id, message_id=st["current_msg_id"])
-        except Exception:
-            pass
-
-    # מחיקת הודעת הפקודה שלך
-    try:
-        await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
-    except Exception:
-        pass
-
-    # הודעת אישור קצרה (אוטו-דיליט)
-    #await notify_and_autodelete(chat.id, "ביטלתי את הסטיקי", context)
-
-
-
-async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    לכל הודעה בקבוצה (לא של הבוט עצמו):
-    נמחק את הסטיקי הקודם ונפרסם אותו מחדש כדי שיהיה בתחתית.
-    עם דיבאונס כדי לא להציף בקבוצות פעילות.
-    """
-    chat = update.effective_chat
-    msg = update.message
-    if not chat or not msg or chat.type not in (Chat.SUPERGROUP, Chat.GROUP):
-        return
-
-    bot_user: User = await context.bot.get_me()
-    if msg.from_user and msg.from_user.id == bot_user.id:
-        return  # לא להגיב לעצמנו
-
-    if chat.id not in sticky_state:
-        return  # אין סטיקי בקבוצה הזו
-
-    # דיבאונס
-    if chat.id in repost_tasks and not repost_tasks[chat.id].done():
-        repost_tasks[chat.id].cancel()
-
-    async def task():
-        await asyncio.sleep(DEBOUNCE_SECONDS)
-        await post_or_repost_sticky(chat.id, context)
-
-    repost_tasks[chat.id] = asyncio.create_task(task())
-
+# ====== Core sticky functions ======
 
 async def post_or_repost_sticky(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     st = sticky_state.get(chat_id)
@@ -237,20 +166,282 @@ async def post_or_repost_sticky(chat_id: int, context: ContextTypes.DEFAULT_TYPE
         logging.error(f"Failed to post sticky: {e}")
 
 
+# ====== Command Handlers ======
+
+async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat or chat.type not in (Chat.SUPERGROUP, Chat.GROUP):
+        try:
+            if update.message:
+                await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
+        return
+
+    # רק אדמינים
+    if not await is_user_admin(update, context):
+        try:
+            if update.message:
+                await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
+        return
+
+    args_text = " ".join(context.args).strip() if context.args else ""
+    reply: Optional[Message] = update.message.reply_to_message if update.message else None
+
+    # ברירת מחדל: פעיל 5 דקות מרגע ההגדרה
+    active_until = compute_active_until(DEFAULT_ACTIVE_MINUTES)
+
+    if args_text:
+        sticky_state[chat.id] = {
+            "mode": "text",
+            "text": args_text,
+            "src_chat_id": None,
+            "src_msg_id": None,
+            "current_msg_id": None,
+            "active_until": active_until,
+        }
+    elif reply:
+        sticky_state[chat.id] = {
+            "mode": "copy",
+            "text": None,
+            "src_chat_id": reply.chat_id,
+            "src_msg_id": reply.message_id,
+            "current_msg_id": None,
+            "active_until": active_until,
+        }
+    else:
+        try:
+            if update.message:
+                await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
+        return
+
+    await post_or_repost_sticky(chat.id, context)
+
+    try:
+        if update.message:
+            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+    except Exception:
+        pass
+
+
+async def clear_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat:
+        return
+
+    # רק אדמינים
+    if not await is_user_admin(update, context):
+        try:
+            if update.message:
+                await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
+        return
+
+    st = sticky_state.pop(chat.id, None)
+    if st and st.get("current_msg_id"):
+        try:
+            await context.bot.delete_message(chat_id=chat.id, message_id=st["current_msg_id"])
+        except Exception:
+            pass
+
+    try:
+        if update.message:
+            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+    except Exception:
+        pass
+
+
+async def set_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /set_time <minutes>
+    קובע לכמה זמן (בדקות) הבוט ימשיך "להזיז" את הסטיקי בקבוצה.
+    1..20 דקות. ברירת מחדל: 5
+    """
+    chat = update.effective_chat
+    if not chat or chat.type not in (Chat.GROUP, Chat.SUPERGROUP):
+        return
+
+    # רק אדמינים
+    if not await is_user_admin(update, context):
+        try:
+            if update.message:
+                await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
+        return
+
+    st = sticky_state.get(chat.id)
+    if not st:
+        # אין סטיקי קיים – פשוט מוחקים פקודה
+        try:
+            if update.message:
+                await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
+        return
+
+    minutes = DEFAULT_ACTIVE_MINUTES
+    if context.args:
+        try:
+            minutes = int(context.args[0])
+        except Exception:
+            minutes = DEFAULT_ACTIVE_MINUTES
+
+    minutes = clamp_minutes(minutes, MIN_ACTIVE_MINUTES, MAX_ACTIVE_MINUTES)
+    st["active_until"] = compute_active_until(minutes)
+
+    try:
+        if update.message:
+            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+    except Exception:
+        pass
+
+
+async def clear_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /clear_media <mins>
+    מפעיל מחיקה אוטומטית של תמונות שיישלחו מעתה והלאה.
+    כל תמונה תימחק X דקות מרגע שליחתה.
+    ברירת מחדל: 5 דקות
+    """
+    chat = update.effective_chat
+    if not chat or chat.type not in (Chat.GROUP, Chat.SUPERGROUP):
+        return
+
+    # רק אדמינים
+    if not await is_user_admin(update, context):
+        try:
+            if update.message:
+                await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
+        return
+
+    mins = DEFAULT_MEDIA_DELETE_MINUTES
+    if context.args:
+        try:
+            mins = int(context.args[0])
+        except Exception:
+            mins = DEFAULT_MEDIA_DELETE_MINUTES
+
+    mins = clamp_minutes(mins, MIN_MEDIA_DELETE_MINUTES, MAX_MEDIA_DELETE_MINUTES)
+
+    media_policy[chat.id] = {
+        "enabled": True,
+        "delete_after_minutes": mins
+    }
+
+    # מחיקת הודעת הפקודה
+    try:
+        if update.message:
+            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+    except Exception:
+        pass
+
+
+async def allow_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /allow_media
+    מבטל מחיקה אוטומטית של תמונות (מכבה את המדיניות שהוגדרה ב-/clear_media)
+    """
+    chat = update.effective_chat
+    if not chat or chat.type not in (Chat.GROUP, Chat.SUPERGROUP):
+        return
+
+    # רק אדמינים
+    if not await is_user_admin(update, context):
+        try:
+            if update.message:
+                await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+        except Exception:
+            pass
+        return
+
+    pol = media_policy.get(chat.id)
+    if pol:
+        pol["enabled"] = False
+
+    # מחיקת הודעת הפקודה
+    try:
+        if update.message:
+            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+    except Exception:
+        pass
+
+
+# ====== Message Handler ======
+
+async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    לכל הודעה בקבוצה (לא של הבוט עצמו):
+    1) אם הופעלה מדיניות clear_media — כל תמונה שנשלחת תמחק אחרי X דקות.
+    2) אם יש סטיקי והטיימר שלו עדיין פעיל — נמחק את הסטיקי הקודם ונפרסם אותו מחדש כדי שיהיה בתחתית.
+       עם דיבאונס כדי לא להציף בקבוצות פעילות.
+    """
+    chat = update.effective_chat
+    msg = update.message
+    if not chat or not msg or chat.type not in (Chat.SUPERGROUP, Chat.GROUP):
+        return
+
+    bot_user: User = await context.bot.get_me()
+    if msg.from_user and msg.from_user.id == bot_user.id:
+        return  # לא להגיב לעצמנו (כולל לא למחוק מדיה של הבוט)
+
+    # ---- (1) Auto-delete photos if enabled ----
+    pol = media_policy.get(chat.id)
+    if pol and pol.get("enabled"):
+        # תמונה = msg.photo (רשימת גדלים), או תמונה שנשלחה כ-document? לפי בקשתך: "תמונות"
+        if getattr(msg, "photo", None):
+            mins = int(pol.get("delete_after_minutes", DEFAULT_MEDIA_DELETE_MINUTES))
+            mins = clamp_minutes(mins, MIN_MEDIA_DELETE_MINUTES, MAX_MEDIA_DELETE_MINUTES)
+            await schedule_delete_message(chat.id, msg.message_id, mins * 60, context)
+
+    # ---- (2) Sticky debounce repost if active ----
+    st = sticky_state.get(chat.id)
+    if not st:
+        return  # אין סטיקי בקבוצה הזו
+
+    if not is_sticky_active(st):
+        return  # הזמן נגמר – מפסיקים להזיז את הסטיקי
+
+    if chat.id in repost_tasks and not repost_tasks[chat.id].done():
+        repost_tasks[chat.id].cancel()
+
+    async def task():
+        await asyncio.sleep(DEBOUNCE_SECONDS)
+
+        # בדיקה מחדש אחרי ההמתנה (אולי הזמן נגמר בינתיים)
+        st2 = sticky_state.get(chat.id)
+        if not st2 or not is_sticky_active(st2):
+            return
+
+        await post_or_repost_sticky(chat.id, context)
+
+    repost_tasks[chat.id] = asyncio.create_task(task())
+
+
 # ====== FastAPI lifecycle & routes ======
 
 @api.on_event("startup")
 async def on_startup():
-    # לרשום handlers
     application.add_handler(CommandHandler("sticky", set_sticky))
     application.add_handler(CommandHandler("unsticky", clear_sticky))
+    application.add_handler(CommandHandler("set_time", set_time))
+
+    # NEW: מדיניות תמונות
+    application.add_handler(CommandHandler("clear_media", clear_media))
+    application.add_handler(CommandHandler("allow_media", allow_media))
+
     application.add_handler(MessageHandler(filters.ALL, on_any_message))
 
-    # להפעיל את אפליקציית הטלגרם (ללא polling)
     await application.initialize()
     await application.start()
 
-    # אם PUBLIC_URL קיים — נגדיר webhook אוטומטית
     if PUBLIC_URL:
         webhook_url = f"{PUBLIC_URL.rstrip('/')}/webhook/{WEBHOOK_SECRET}"
         await application.bot.set_webhook(
@@ -277,6 +468,7 @@ async def healthcheck():
 async def telegram_webhook(secret: str, request: Request):
     if secret != WEBHOOK_SECRET:
         return {"ok": False}
+
     data = await request.json()
     update = Update.de_json(data, application.bot)
     await application.update_queue.put(update)
