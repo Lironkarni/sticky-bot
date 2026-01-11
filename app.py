@@ -45,7 +45,7 @@ MAX_MEDIA_DELETE_MINUTES = 60  # אפשר לשנות אם תרצה
 #   "src_chat_id": Optional[int],
 #   "src_msg_id": Optional[int],
 #   "current_msg_id": Optional[int],
-#   "active_until": Optional[float],  # epoch seconds; אם עבר - מפסיקים להזיז
+#   "active_until": Optional[float],  # epoch seconds; אם עבר - מפסיקים להזיז + מוחקים את ההודעה המודבקת
 # }
 sticky_state: Dict[int, Dict] = {}
 repost_tasks: Dict[int, asyncio.Task] = {}
@@ -87,7 +87,7 @@ async def notify_and_autodelete(chat_id: int, text: str, context: ContextTypes.D
 async def is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
     user = update.effective_user
-    msg = update.effective_message  # הדרך הבטוחה להגיע ל-message
+    msg = update.effective_message
 
     if not chat:
         return False
@@ -100,7 +100,6 @@ async def is_user_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
         except Exception:
             pass
 
-    # בדיקה רגילה: משתמש הוא אדמין/יוצר
     if not user:
         return False
     try:
@@ -134,6 +133,20 @@ async def schedule_delete_message(chat_id: int, message_id: int, delay_seconds: 
         except Exception:
             pass
     asyncio.create_task(_later())
+
+
+async def delete_current_sticky(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """מוחק את ההודעה המודבקת הנוכחית (אם קיימת) ומנקה current_msg_id."""
+    st = sticky_state.get(chat_id)
+    if not st:
+        return
+    cur = st.get("current_msg_id")
+    if cur:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=cur)
+        except Exception:
+            pass
+        st["current_msg_id"] = None
 
 
 # ====== Core sticky functions ======
@@ -178,7 +191,6 @@ async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    # רק אדמינים
     if not await is_user_admin(update, context):
         try:
             if update.message:
@@ -190,7 +202,6 @@ async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args_text = " ".join(context.args).strip() if context.args else ""
     reply: Optional[Message] = update.message.reply_to_message if update.message else None
 
-    # ברירת מחדל: פעיל 5 דקות מרגע ההגדרה
     active_until = compute_active_until(DEFAULT_ACTIVE_MINUTES)
 
     if args_text:
@@ -229,11 +240,14 @@ async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def clear_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /unsticky:
+    מבטל את הסטיקי + מוחק את ההודעה המודבקת מיידית.
+    """
     chat = update.effective_chat
     if not chat:
         return
 
-    # רק אדמינים
     if not await is_user_admin(update, context):
         try:
             if update.message:
@@ -242,12 +256,10 @@ async def clear_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    st = sticky_state.pop(chat.id, None)
-    if st and st.get("current_msg_id"):
-        try:
-            await context.bot.delete_message(chat_id=chat.id, message_id=st["current_msg_id"])
-        except Exception:
-            pass
+    st = sticky_state.get(chat.id)
+    if st:
+        await delete_current_sticky(chat.id, context)
+        sticky_state.pop(chat.id, None)
 
     try:
         if update.message:
@@ -266,7 +278,6 @@ async def set_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chat or chat.type not in (Chat.GROUP, Chat.SUPERGROUP):
         return
 
-    # רק אדמינים
     if not await is_user_admin(update, context):
         try:
             if update.message:
@@ -277,7 +288,6 @@ async def set_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     st = sticky_state.get(chat.id)
     if not st:
-        # אין סטיקי קיים – פשוט מוחקים פקודה
         try:
             if update.message:
                 await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
@@ -313,7 +323,6 @@ async def clear_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chat or chat.type not in (Chat.GROUP, Chat.SUPERGROUP):
         return
 
-    # רק אדמינים
     if not await is_user_admin(update, context):
         try:
             if update.message:
@@ -336,7 +345,6 @@ async def clear_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "delete_after_minutes": mins
     }
 
-    # מחיקת הודעת הפקודה
     try:
         if update.message:
             await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
@@ -347,13 +355,12 @@ async def clear_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def allow_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /allow_media
-    מבטל מחיקה אוטומטית של תמונות (מכבה את המדיניות שהוגדרה ב-/clear_media)
+    מבטל מחיקה אוטומטית של תמונות.
     """
     chat = update.effective_chat
     if not chat or chat.type not in (Chat.GROUP, Chat.SUPERGROUP):
         return
 
-    # רק אדמינים
     if not await is_user_admin(update, context):
         try:
             if update.message:
@@ -366,7 +373,6 @@ async def allow_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pol:
         pol["enabled"] = False
 
-    # מחיקת הודעת הפקודה
     try:
         if update.message:
             await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
@@ -380,8 +386,9 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     לכל הודעה בקבוצה (לא של הבוט עצמו):
     1) אם הופעלה מדיניות clear_media — כל תמונה שנשלחת תמחק אחרי X דקות.
-    2) אם יש סטיקי והטיימר שלו עדיין פעיל — נמחק את הסטיקי הקודם ונפרסם אותו מחדש כדי שיהיה בתחתית.
-       עם דיבאונס כדי לא להציף בקבוצות פעילות.
+    2) אם יש סטיקי:
+       - אם הטיימר נגמר: נמחק את ההודעה המודבקת ונבטל את הסטיקי.
+       - אם הטיימר פעיל: נעשה repost עם דיבאונס.
     """
     chat = update.effective_chat
     msg = update.message
@@ -390,34 +397,46 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     bot_user: User = await context.bot.get_me()
     if msg.from_user and msg.from_user.id == bot_user.id:
-        return  # לא להגיב לעצמנו (כולל לא למחוק מדיה של הבוט)
+        return  # לא להגיב לעצמנו
 
     # ---- (1) Auto-delete photos if enabled ----
     pol = media_policy.get(chat.id)
     if pol and pol.get("enabled"):
-        # תמונה = msg.photo (רשימת גדלים), או תמונה שנשלחה כ-document? לפי בקשתך: "תמונות"
         if getattr(msg, "photo", None):
             mins = int(pol.get("delete_after_minutes", DEFAULT_MEDIA_DELETE_MINUTES))
             mins = clamp_minutes(mins, MIN_MEDIA_DELETE_MINUTES, MAX_MEDIA_DELETE_MINUTES)
             await schedule_delete_message(chat.id, msg.message_id, mins * 60, context)
 
-    # ---- (2) Sticky debounce repost if active ----
+    # ---- (2) Sticky handling ----
     st = sticky_state.get(chat.id)
     if not st:
-        return  # אין סטיקי בקבוצה הזו
+        return
 
+    # אם הזמן נגמר — למחוק את ההודעה המודבקת ולבטל סטיקי לגמרי
     if not is_sticky_active(st):
-        return  # הזמן נגמר – מפסיקים להזיז את הסטיקי
+        # גם לבטל task ממתין אם קיים
+        t = repost_tasks.get(chat.id)
+        if t and not t.done():
+            t.cancel()
+        await delete_current_sticky(chat.id, context)
+        sticky_state.pop(chat.id, None)
+        return
 
+    # דיבאונס repost
     if chat.id in repost_tasks and not repost_tasks[chat.id].done():
         repost_tasks[chat.id].cancel()
 
     async def task():
         await asyncio.sleep(DEBOUNCE_SECONDS)
 
-        # בדיקה מחדש אחרי ההמתנה (אולי הזמן נגמר בינתיים)
         st2 = sticky_state.get(chat.id)
-        if not st2 or not is_sticky_active(st2):
+        if not st2:
+            return
+
+        # אם הזמן נגמר בזמן ההמתנה — למחוק ולבטל
+        if not is_sticky_active(st2):
+            await delete_current_sticky(chat.id, context)
+            sticky_state.pop(chat.id, None)
             return
 
         await post_or_repost_sticky(chat.id, context)
@@ -433,7 +452,6 @@ async def on_startup():
     application.add_handler(CommandHandler("unsticky", clear_sticky))
     application.add_handler(CommandHandler("set_time", set_time))
 
-    # NEW: מדיניות תמונות
     application.add_handler(CommandHandler("clear_media", clear_media))
     application.add_handler(CommandHandler("allow_media", allow_media))
 
