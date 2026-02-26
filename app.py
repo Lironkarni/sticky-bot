@@ -512,8 +512,8 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @api.on_event("startup")
 async def on_startup():
-    application.add_handler(CommandHandler("את", greet_female))
-    application.add_handler(CommandHandler("אתה", greet_male))
+    application.add_handler(CommandHandler("at", greet_female))
+    application.add_handler(CommandHandler("ata", greet_male))
     application.add_handler(CommandHandler("sticky", set_sticky))
     application.add_handler(CommandHandler("unsticky", clear_sticky))
     application.add_handler(CommandHandler("set_time", set_time))
