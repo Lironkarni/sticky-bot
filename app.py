@@ -2,6 +2,7 @@ import os
 import time
 import asyncio
 import logging
+import random
 from typing import Dict, Optional
 
 from fastapi import FastAPI, Request
@@ -21,6 +22,35 @@ PUBLIC_URL = os.environ.get("PUBLIC_URL")         # למשל: https://my-bot.onr
 
 DEBOUNCE_SECONDS = float(os.environ.get("DEBOUNCE_SECONDS", "1"))
 AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", "0"))
+
+# --------------------
+# ברכות רנדומליות /את /אתה
+# --------------------
+GREETINGS_F = [
+    "היי אלופה 💫 מה נשמע?",
+    "אהלן את 👑 יאללה תני בראש!",
+    "בוקר טוב יפה 😊 מקווה שהיום שלך הולך מעולה.",
+    "ערב טוב מלכה 🌙 איך עבר עלייך היום?",
+    "מה קורה תותחית 😄 שמח לראות אותך כאן!",
+    "איזה כיף שאת פה 💛 ברוכה הבאה!",
+    "את זורחת היום ✨ מה חדש?",
+    "היי נסיכה 🌸 מה בא לך לעשות עכשיו?",
+    "ברוכה הבאה! שתהיה לך אנרגיה טובה היום 🙌",
+    "את על זה 🔥 שיהיה לך יום פגז!"
+]
+
+GREETINGS_M = [
+    "היי אלוף 💫 מה נשמע?",
+    "אהלן אתה 👑 יאללה תן בראש!",
+    "בוקר טוב גבר 😊 מקווה שהיום שלך הולך מעולה.",
+    "ערב טוב מלך 🌙 איך עבר עליך היום?",
+    "מה קורה תותח 😄 שמח לראות אותך כאן!",
+    "איזה כיף שאתה פה 💛 ברוך הבא!",
+    "אתה על הגל ✨ מה חדש?",
+    "היי אח יקר 🤝 מה בא לך לעשות עכשיו?",
+    "ברוך הבא! שתהיה לך אנרגיה טובה היום 🙌",
+    "אתה על זה 🔥 שיהיה לך יום פגז!"
+]
 
 # --------------------
 # /set_time config (סטיקי)
@@ -67,6 +97,10 @@ application = Application.builder().token(BOT_TOKEN).build()
 
 
 # ====== Helpers ======
+
+def pick_random_greeting(is_female: bool) -> str:
+    pool = GREETINGS_F if is_female else GREETINGS_M
+    return random.choice(pool)
 
 async def notify_and_autodelete(chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE):
     """שולח הודעה קצרה ומוחק אותה אוטומטית אחרי AUTO_DELETE_SECONDS (אם >0)."""
@@ -180,6 +214,36 @@ async def post_or_repost_sticky(chat_id: int, context: ContextTypes.DEFAULT_TYPE
 
 
 # ====== Command Handlers ======
+
+async def greet_female(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat:
+        return
+
+    text = pick_random_greeting(is_female=True)
+    await context.bot.send_message(chat_id=chat.id, text=text)
+
+    # אופציונלי: למחוק את הפקודה עצמה כדי לשמור נקי
+    try:
+        if update.message:
+            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+    except Exception:
+        pass
+
+
+async def greet_male(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat:
+        return
+
+    text = pick_random_greeting(is_female=False)
+    await context.bot.send_message(chat_id=chat.id, text=text)
+
+    try:
+        if update.message:
+            await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
+    except Exception:
+        pass
 
 async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -448,6 +512,8 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @api.on_event("startup")
 async def on_startup():
+    application.add_handler(CommandHandler("את", greet_female))
+    application.add_handler(CommandHandler("אתה", greet_male))
     application.add_handler(CommandHandler("sticky", set_sticky))
     application.add_handler(CommandHandler("unsticky", clear_sticky))
     application.add_handler(CommandHandler("set_time", set_time))
