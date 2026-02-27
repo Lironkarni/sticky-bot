@@ -24,7 +24,7 @@ DEBOUNCE_SECONDS = float(os.environ.get("DEBOUNCE_SECONDS", "1"))
 AUTO_DELETE_SECONDS = int(os.environ.get("AUTO_DELETE_SECONDS", "0"))
 
 # --------------------
-# ברכות רנדומליות /את /אתה
+# ברכות רנדומליות /at /ata
 # --------------------
 GREETINGS_F = [
     "היי אלופה 💫 מה נשמע?",
@@ -101,6 +101,19 @@ application = Application.builder().token(BOT_TOKEN).build()
 def pick_random_greeting(is_female: bool) -> str:
     pool = GREETINGS_F if is_female else GREETINGS_M
     return random.choice(pool)
+
+
+def get_reply_to_message_id(update: Update) -> Optional[int]:
+    """
+    אם הפקודה נשלחה כ-Reply להודעה של מישהו:
+    מחזיר את message_id של ההודעה המקורית כדי שהבוט יעשה Reply אליה.
+    אם לא נשלח כ-Reply -> מחזיר None.
+    """
+    msg = update.effective_message
+    if not msg or not getattr(msg, "reply_to_message", None):
+        return None
+    return msg.reply_to_message.message_id
+
 
 async def notify_and_autodelete(chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE):
     """שולח הודעה קצרה ומוחק אותה אוטומטית אחרי AUTO_DELETE_SECONDS (אם >0)."""
@@ -220,10 +233,17 @@ async def greet_female(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chat:
         return
 
+    reply_to_id = get_reply_to_message_id(update)
     text = pick_random_greeting(is_female=True)
-    await context.bot.send_message(chat_id=chat.id, text=text)
 
-    # אופציונלי: למחוק את הפקודה עצמה כדי לשמור נקי
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text=text,
+        reply_to_message_id=reply_to_id,  # אם None -> נשלח רגיל
+        disable_web_page_preview=True
+    )
+
+    # למחוק את הודעת הפקודה כדי לשמור נקי
     try:
         if update.message:
             await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
@@ -236,14 +256,22 @@ async def greet_male(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chat:
         return
 
+    reply_to_id = get_reply_to_message_id(update)
     text = pick_random_greeting(is_female=False)
-    await context.bot.send_message(chat_id=chat.id, text=text)
+
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text=text,
+        reply_to_message_id=reply_to_id,
+        disable_web_page_preview=True
+    )
 
     try:
         if update.message:
             await context.bot.delete_message(chat_id=chat.id, message_id=update.message.message_id)
     except Exception:
         pass
+
 
 async def set_sticky(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -514,6 +542,7 @@ async def on_any_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_startup():
     application.add_handler(CommandHandler("at", greet_female))
     application.add_handler(CommandHandler("ata", greet_male))
+
     application.add_handler(CommandHandler("sticky", set_sticky))
     application.add_handler(CommandHandler("unsticky", clear_sticky))
     application.add_handler(CommandHandler("set_time", set_time))
