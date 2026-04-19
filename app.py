@@ -262,25 +262,33 @@ async def handle_greeting(update: Update, context: ContextTypes.DEFAULT_TYPE, is
         except: pass
         return
 
-    # בדיקה למי עונים
-    replied_user = msg.reply_to_message.from_user if msg.reply_to_message else None
-    reply_to_id = msg.reply_to_message.message_id if msg.reply_to_message else None
+    # בדיקה למי עונים - שליפת הודעת המקור
+    reply_to_msg = msg.reply_to_message
+    replied_user = reply_to_msg.from_user if reply_to_msg else None
+    
+    # ה-ID של ההודעה שעליה נגיב (אם זו לא תגובה, הבוט פשוט ישלח הודעה רגילה)
+    reply_to_id = reply_to_msg.message_id if reply_to_msg else None
 
-    # בחירת טקסט
+    # בחירת טקסט האיחול
     if is_special_user(replied_user):
         text = random.choice(GREETINGS_H)
     else:
         text = pick_random_greeting(is_female)
 
-    # שליחה
-    await context.bot.send_message(
-        chat_id=chat.id,
-        text=text,
-        reply_to_message_id=reply_to_id,
-        disable_web_page_preview=True
-    )
+    # שליחה עם הגדרה מפורשת לעשות Reply
+    try:
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=text,
+            reply_to_message_id=reply_to_id, # כאן הקסם קורה
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        logging.error(f"Error sending message: {e}")
+        # במקרה חירום שבו ה-reply_to_id לא תקף, נשלח בלי reply
+        await context.bot.send_message(chat_id=chat.id, text=text)
 
-    # מחיקת הודעת הפקודה
+    # מחיקת הודעת הפקודה שלך כדי לשמור על סדר
     try:
         await context.bot.delete_message(chat_id=chat.id, message_id=msg.message_id)
     except: pass
